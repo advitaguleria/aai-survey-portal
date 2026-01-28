@@ -38,6 +38,12 @@ const userSchema = new mongoose.Schema({
         type: String,
         required: true,
     },
+    // ADD THIS FIELD FOR DEVICE REGISTRATION
+    deviceId: {
+        type: String,
+        required: true,
+        unique: true  // This prevents multiple registrations from same device
+    },
     isFirstLogin: {
         type: Boolean,
         default: true,

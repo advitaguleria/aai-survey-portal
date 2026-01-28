@@ -17,6 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { getDeviceId } from '../../utils/device'; // ADD THIS IMPORT
 
 const RegisterScreen = ({ navigation }) => {
     const { register } = useAuth();
@@ -33,6 +34,7 @@ const RegisterScreen = ({ navigation }) => {
     const [errors, setErrors] = useState({});
     const [isDetectingLocation, setIsDetectingLocation] = useState(true);
     const [locationStatus, setLocationStatus] = useState('Detecting your location...');
+    const [deviceId, setDeviceId] = useState(''); // ADD THIS STATE
     
     // Airport database with coordinates
     const airports = [
@@ -212,8 +214,19 @@ const RegisterScreen = ({ navigation }) => {
         }
     };
 
-    // Auto-detect location on component mount
+    // Get device ID on component mount
     useEffect(() => {
+        const getDeviceIdentifier = async () => {
+            try {
+                const id = await getDeviceId();
+                setDeviceId(id);
+                console.log('Device ID:', id);
+            } catch (error) {
+                console.error('Error getting device ID:', error);
+            }
+        };
+        
+        getDeviceIdentifier();
         detectLocationAndSetAirport();
     }, []);
 
@@ -260,6 +273,12 @@ const RegisterScreen = ({ navigation }) => {
             return;
         }
 
+        // Check if device ID is available
+        if (!deviceId) {
+            Alert.alert('Device Error', 'Unable to get device information. Please try again.');
+            return;
+        }
+
         setLoading(true);
         try {
             const selectedAirport = airports.find(a => a.code === formData.airportCode);
@@ -274,6 +293,7 @@ const RegisterScreen = ({ navigation }) => {
             formDataToSend.append('companyOrganization', formData.companyOrganization);
             formDataToSend.append('airportCode', formData.airportCode);
             formDataToSend.append('airportName', selectedAirport.name);
+            formDataToSend.append('deviceId', deviceId); // ADD DEVICE ID
             
             // Append employee ID image with proper MIME type
             if (employeeIdImage) {
@@ -301,10 +321,21 @@ const RegisterScreen = ({ navigation }) => {
                 ]
             );
         } catch (error) {
-            Alert.alert(
-                'Registration Failed',
-                error.response?.data?.message || 'Something went wrong. Please try again.'
-            );
+            // Check if error is about device already registered
+            const errorMessage = error.response?.data?.message || 'Something went wrong. Please try again.';
+            
+            if (errorMessage.includes('device is already registered')) {
+                Alert.alert(
+                    'Device Already Registered',
+                    'This device is already registered with an account. Please login with your existing account or use a different device to register.',
+                    [
+                        { text: 'Login Instead', onPress: () => navigation.navigate('Login') },
+                        { text: 'OK', style: 'cancel' }
+                    ]
+                );
+            } else {
+                Alert.alert('Registration Failed', errorMessage);
+            }
         } finally {
             setLoading(false);
         }
@@ -338,6 +369,13 @@ const RegisterScreen = ({ navigation }) => {
                     <View style={styles.formCard}>
                         <Text style={styles.formTitle}>Create Account</Text>
                         <Text style={styles.formSubtitle}>Fill in your details to register</Text>
+
+                        {/* Device Info (Optional: Show for debugging) */}
+                        {/* <View style={styles.deviceInfoContainer}>
+                            <Text style={styles.deviceInfoText}>
+                                Device ID: {deviceId ? `${deviceId.substring(0, 10)}...` : 'Loading...'}
+                            </Text>
+                        </View> */}
 
                         {/* Location Detection Section */}
                         <View style={styles.locationContainer}>
@@ -570,6 +608,20 @@ const styles = StyleSheet.create({
         textAlign: 'center',
         marginBottom: 24,
     },
+    deviceInfoContainer: {
+        backgroundColor: '#e3f2fd',
+        padding: 10,
+        borderRadius: 8,
+        marginBottom: 15,
+        borderWidth: 1,
+        borderColor: '#90caf9',
+    },
+    deviceInfoText: {
+        fontSize: 12,
+        color: '#1565c0',
+        textAlign: 'center',
+        fontStyle: 'italic',
+    },
     inputContainer: {
         marginBottom: 20,
     },
@@ -638,7 +690,7 @@ const styles = StyleSheet.create({
         fontSize: 12,
     },
     
-    // NEW STYLES FOR AUTO-LOCATION FEATURE
+    // Location feature styles
     locationContainer: {
         marginBottom: 24,
         padding: 16,

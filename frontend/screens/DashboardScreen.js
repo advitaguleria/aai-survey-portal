@@ -11,18 +11,23 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
+import { useOffline } from '../context/OfflineContext';
 import { surveyService } from '../services/surveyService';
 import { MaterialIcons, FontAwesome } from '@expo/vector-icons';
+import offlineService from '../services/offlineService';
 
 const DashboardScreen = ({ navigation }) => {
     const { user, logout } = useAuth();
+    const { isOnline, pendingCount, triggerSync } = useOffline();
     const [stats, setStats] = useState({ 
-        totalSurveys: 0,  // This should update when you delete from MongoDB
-        surveysThisMonth: 0 
+        totalSurveys: 0,
+        surveysThisMonth: 0,
+        pendingSync: 0
     });
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState(false);
+    const [recentActivity, setRecentActivity] = useState([]);
 
     useEffect(() => {
         loadDashboardData();
@@ -39,20 +44,32 @@ const DashboardScreen = ({ navigation }) => {
         setError(false);
         try {
             let dashboardStats = { totalSurveys: 0, surveysThisMonth: 0 };
+            
             try {
                 dashboardStats = await surveyService.getDashboardStats();
                 console.log('🔧 [DEBUG] Dashboard stats received:', dashboardStats);
-                setStats({
-                    totalSurveys: dashboardStats.totalSurveys || dashboardStats.surveysThisMonth || 0,
-                    surveysThisMonth: dashboardStats.surveysThisMonth || 0
-                });
             } catch (statsError) {
-                console.log('Stats loading failed, using defaults:', statsError.message);
-                setStats({
-                    totalSurveys: 0,
-                    surveysThisMonth: 0
-                });
+                console.log('Stats loading failed, using offline data:', statsError.message);
+                // Fallback to offline data
+                const localSubmissions = await offlineService.getLocalSubmissions();
+                dashboardStats = {
+                    totalSurveys: localSubmissions.length,
+                    surveysThisMonth: localSubmissions.filter(s => isThisMonth(new Date(s.localTimestamp))).length,
+                    offline: true
+                };
             }
+
+            // Load recent activity
+            const activity = await loadRecentActivity();
+            setRecentActivity(activity.slice(0, 3)); // Show only 3 most recent
+            
+            setStats({
+                totalSurveys: dashboardStats.totalSurveys || 0,
+                surveysThisMonth: dashboardStats.surveysThisMonth || 0,
+                pendingSync: pendingCount,
+                offline: dashboardStats.offline || false
+            });
+            
         } catch (error) {
             console.error('Dashboard load error:', error);
             setError(true);
@@ -62,9 +79,49 @@ const DashboardScreen = ({ navigation }) => {
         }
     };
 
-    const handleRefresh = () => {
+    const loadRecentActivity = async () => {
+        try {
+            // Combine online and offline submissions
+            let onlineSubmissions = [];
+            try {
+                const response = await surveyService.getPastSubmissions();
+                onlineSubmissions = response.submissions || [];
+            } catch (error) {
+                console.log('Could not load online submissions:', error.message);
+            }
+            
+            const offlineSubmissions = await offlineService.getLocalSubmissions();
+            
+            // Format offline submissions for display
+            const formattedOfflineSubmissions = offlineSubmissions.map(sub => ({
+                _id: sub.id || `local_${Date.now()}`,
+                flightNumber: sub.flightNumber || 'N/A',
+                terminal: sub.terminal || 'N/A',
+                createdAt: sub.localTimestamp || new Date().toISOString(),
+                offline: true,
+                status: 'pending'
+            }));
+            
+            // Combine and sort by date
+            const allSubmissions = [...onlineSubmissions, ...formattedOfflineSubmissions]
+                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+            
+            return allSubmissions;
+        } catch (error) {
+            console.error('Error loading recent activity:', error);
+            return [];
+        }
+    };
+
+    const isThisMonth = (date) => {
+        const today = new Date();
+        return date.getMonth() === today.getMonth() && 
+               date.getFullYear() === today.getFullYear();
+    };
+
+    const handleRefresh = async () => {
         setRefreshing(true);
-        loadDashboardData();
+        await loadDashboardData();
     };
 
     const handleLogout = () => {
@@ -76,7 +133,38 @@ const DashboardScreen = ({ navigation }) => {
                 {
                     text: 'Logout',
                     style: 'destructive',
-                    onPress: logout,
+                    onPress: async () => {
+                        await logout();
+                        // Clear offline data on logout
+                        await offlineService.clearAllOfflineData();
+                    },
+                },
+            ]
+        );
+    };
+
+    const handleManualSync = async () => {
+        if (!isOnline) {
+            Alert.alert('Offline', 'You need to be online to sync data.');
+            return;
+        }
+        
+        Alert.alert(
+            'Sync Data',
+            `Sync ${pendingCount} pending items?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Sync Now',
+                    onPress: async () => {
+                        try {
+                            await triggerSync();
+                            await loadDashboardData(); // Refresh after sync
+                            Alert.alert('Success', 'Data synced successfully!');
+                        } catch (error) {
+                            Alert.alert('Sync Failed', 'Could not sync data. Please try again.');
+                        }
+                    }
                 },
             ]
         );
@@ -99,14 +187,36 @@ const DashboardScreen = ({ navigation }) => {
                 }
                 showsVerticalScrollIndicator={false}
             >
-                {/* Header Section - UNCHANGED */}
+                {/* ===== NETWORK STATUS BANNER ===== */}
+                {!isOnline && (
+                    <View style={styles.offlineBanner}>
+                        <MaterialIcons name="wifi-off" size={20} color="#FFF" />
+                        <Text style={styles.offlineText}>
+                            Offline Mode • {pendingCount} pending sync
+                        </Text>
+                        <TouchableOpacity 
+                            style={styles.syncNowButton}
+                            onPress={handleManualSync}
+                        >
+                            <Text style={styles.syncNowText}>Sync Now</Text>
+                        </TouchableOpacity>
+                    </View>
+                )}
+
+                {/* ===== HEADER SECTION ===== */}
                 <View style={styles.header}>
                     <View style={styles.headerTop}>
                         <View style={styles.headerLeft}>
                             <Text style={styles.portalTitle}>AAI Survey Portal</Text>
                             <Text style={styles.welcomeText}>
-                                Welcome, {user?.fullName || 'User'}!
+                                Welcome, {user?.fullName || user?.name || 'User'}!
                             </Text>
+                            {user?.offlineMode && (
+                                <View style={styles.offlineBadge}>
+                                    <MaterialIcons name="cloud-off" size={14} color="#FF9800" />
+                                    <Text style={styles.offlineBadgeText}>Offline Account</Text>
+                                </View>
+                            )}
                         </View>
                         <TouchableOpacity 
                             style={styles.logoutButton}
@@ -116,9 +226,18 @@ const DashboardScreen = ({ navigation }) => {
                             <Text style={styles.logoutText}>Logout</Text>
                         </TouchableOpacity>
                     </View>
+
+                    {/* Connection Status Indicator */}
+                    <View style={styles.connectionStatus}>
+                        <View style={[styles.statusDot, { backgroundColor: isOnline ? '#4CAF50' : '#FF9800' }]} />
+                        <Text style={styles.statusText}>
+                            {isOnline ? 'Online' : 'Offline'} • 
+                            Last sync: {stats.offline ? 'Pending' : 'Today'}
+                        </Text>
+                    </View>
                 </View>
 
-                {/* Airport Name Section */}
+                {/* ===== AIRPORT NAME SECTION ===== */}
                 {user?.airportName && (
                     <View style={styles.airportSection}>
                         <MaterialIcons name="location-on" size={20} color="#1a237e" />
@@ -128,7 +247,34 @@ const DashboardScreen = ({ navigation }) => {
                     </View>
                 )}
 
-                {/* Share Your Experience Section */}
+                {/* ===== QUICK STATS CARDS ===== */}
+                <View style={styles.statsGrid}>
+                    <View style={styles.statCard}>
+                        <View style={[styles.statIcon, { backgroundColor: '#E8EAF6' }]}>
+                            <MaterialIcons name="assessment" size={24} color="#1a237e" />
+                        </View>
+                        <Text style={styles.statNumber}>{stats.totalSurveys}</Text>
+                        <Text style={styles.statLabel}>Total Surveys</Text>
+                    </View>
+                    
+                    <View style={styles.statCard}>
+                        <View style={[styles.statIcon, { backgroundColor: '#E8F5E8' }]}>
+                            <MaterialIcons name="today" size={24} color="#2E7D32" />
+                        </View>
+                        <Text style={styles.statNumber}>{stats.surveysThisMonth}</Text>
+                        <Text style={styles.statLabel}>This Month</Text>
+                    </View>
+                    
+                    <View style={styles.statCard}>
+                        <View style={[styles.statIcon, { backgroundColor: '#FFEBEE' }]}>
+                            <MaterialIcons name="sync" size={24} color="#D32F2F" />
+                        </View>
+                        <Text style={styles.statNumber}>{stats.pendingSync}</Text>
+                        <Text style={styles.statLabel}>Pending Sync</Text>
+                    </View>
+                </View>
+
+                {/* ===== SHARE YOUR EXPERIENCE SECTION ===== */}
                 <View style={styles.experienceCard}>
                     <Text style={styles.experienceTitle}>Share Your Experience</Text>
                     <Text style={styles.experienceDescription}>
@@ -144,23 +290,50 @@ const DashboardScreen = ({ navigation }) => {
                     </TouchableOpacity>
                 </View>
 
-                {/* Total Surveys Completed Card - FIXED: Now using stats.totalSurveys */}
-                <View style={styles.statsContainer}>
-                    <View style={styles.statsCard}>
-                        <View style={styles.statsIconContainer}>
-                            <MaterialIcons name="assessment" size={32} color="#1a237e" />
+                {/* ===== RECENT ACTIVITY ===== */}
+                {recentActivity.length > 0 && (
+                    <View style={styles.activityCard}>
+                        <View style={styles.activityHeader}>
+                            <MaterialIcons name="history" size={24} color="#1a237e" />
+                            <Text style={styles.activityTitle}>Recent Activity</Text>
                         </View>
-                        <Text style={styles.statsNumber}>
-                            {stats.totalSurveys} {/* CHANGED from user?.surveysCompleted */}
-                        </Text>
-                        <Text style={styles.statsTitle}>Total Surveys Completed</Text>
-                        <Text style={styles.statsSubtitle}>
-                            Keep contributing to improve services
-                        </Text>
+                        
+                        {recentActivity.map((activity, index) => (
+                            <View key={index} style={styles.activityItem}>
+                                <View style={styles.activityLeft}>
+                                    <MaterialIcons 
+                                        name={activity.offline ? "cloud-upload" : "check-circle"} 
+                                        size={20} 
+                                        color={activity.offline ? "#FF9800" : "#4CAF50"} 
+                                    />
+                                    <View style={styles.activityDetails}>
+                                        <Text style={styles.activityFlight}>
+                                            Flight {activity.flightNumber} • Terminal {activity.terminal}
+                                        </Text>
+                                        <Text style={styles.activityTime}>
+                                            {new Date(activity.createdAt).toLocaleDateString()}
+                                        </Text>
+                                    </View>
+                                </View>
+                                {activity.offline && (
+                                    <View style={styles.offlineIndicator}>
+                                        <Text style={styles.offlineIndicatorText}>Offline</Text>
+                                    </View>
+                                )}
+                            </View>
+                        ))}
+                        
+                        <TouchableOpacity 
+                            style={styles.viewAllButton}
+                            onPress={() => navigation.navigate('PastSubmissions')}
+                        >
+                            <Text style={styles.viewAllText}>View All Submissions</Text>
+                            <MaterialIcons name="chevron-right" size={20} color="#1a237e" />
+                        </TouchableOpacity>
                     </View>
-                </View>
+                )}
 
-                {/* Your Feedback History Card */}
+                {/* ===== YOUR FEEDBACK HISTORY CARD (RESTORED) ===== */}
                 <View style={styles.historyCard}>
                     <View style={styles.historyHeader}>
                         <MaterialIcons name="history" size={24} color="#1a237e" />
@@ -180,7 +353,42 @@ const DashboardScreen = ({ navigation }) => {
                     </TouchableOpacity>
                 </View>
 
-                {/* Footer Links */}
+                {/* ===== SYSTEM STATUS ===== */}
+                <View style={styles.systemCard}>
+                    <Text style={styles.systemTitle}>System Status</Text>
+                    <View style={styles.systemItem}>
+                        <MaterialIcons 
+                            name="wifi" 
+                            size={20} 
+                            color={isOnline ? "#4CAF50" : "#FF9800"} 
+                        />
+                        <Text style={styles.systemText}>
+                            Connection: {isOnline ? 'Online' : 'Offline'}
+                        </Text>
+                    </View>
+                    <View style={styles.systemItem}>
+                        <MaterialIcons 
+                            name="cloud" 
+                            size={20} 
+                            color={pendingCount > 0 ? "#FF9800" : "#4CAF50"} 
+                        />
+                        <Text style={styles.systemText}>
+                            Sync: {pendingCount > 0 ? `${pendingCount} pending` : 'Up to date'}
+                        </Text>
+                    </View>
+                    <View style={styles.systemItem}>
+                        <MaterialIcons 
+                            name="account-circle" 
+                            size={20} 
+                            color={user?.offlineMode ? "#FF9800" : "#4CAF50"} 
+                        />
+                        <Text style={styles.systemText}>
+                            Account: {user?.offlineMode ? 'Offline Mode' : 'Online Mode'}
+                        </Text>
+                    </View>
+                </View>
+
+                {/* ===== FOOTER LINKS ===== */}
                 <View style={styles.footerLinks}>
                     <TouchableOpacity style={styles.footerLink}>
                         <Text style={styles.footerLinkText}>Contact Us</Text>
@@ -203,14 +411,14 @@ const DashboardScreen = ({ navigation }) => {
                     </TouchableOpacity>
                 </View>
 
-                {/* Copyright Footer */}
+                {/* ===== COPYRIGHT FOOTER ===== */}
                 <View style={styles.copyrightFooter}>
                     <Text style={styles.copyrightText}>
                         © 2026 AIRPORTS AUTHORITY OF INDIA All Rights Reserved.
                     </Text>
                 </View>
 
-                {/* Error Message (only shows if there was an error) */}
+                {/* ===== ERROR MESSAGE ===== */}
                 {error && (
                     <View style={styles.errorContainer}>
                         <MaterialIcons name="error-outline" size={20} color="#d32f2f" />
@@ -220,15 +428,17 @@ const DashboardScreen = ({ navigation }) => {
                     </View>
                 )}
 
-                {/* Debug Button - You can remove this after testing */}
+                {/* ===== DEBUG BUTTON ===== */}
                 <TouchableOpacity 
                     style={styles.debugButton}
                     onPress={() => {
                         console.log('🔧 [DEBUG] Current stats:', stats);
                         console.log('🔧 [DEBUG] User data:', user);
+                        console.log('🔧 [DEBUG] Online status:', isOnline);
+                        console.log('🔧 [DEBUG] Pending count:', pendingCount);
                         Alert.alert(
                             'Debug Info',
-                            `Total Surveys in System: ${stats.totalSurveys}\nSurveys This Month: ${stats.surveysThisMonth}\nUser Surveys Completed: ${user?.surveysCompleted || 0}`,
+                            `Status: ${isOnline ? 'Online' : 'Offline'}\nPending Sync: ${pendingCount}\nTotal Surveys: ${stats.totalSurveys}\nOffline Mode: ${user?.offlineMode ? 'Yes' : 'No'}`,
                             [{ text: 'OK' }]
                         );
                     }}
@@ -240,7 +450,7 @@ const DashboardScreen = ({ navigation }) => {
     );
 };
 
-// Styles remain EXACTLY the same as your original
+// Updated Styles with restored history card
 const styles = StyleSheet.create({
     safeArea: {
         flex: 1,
@@ -255,11 +465,39 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         alignItems: 'center',
     },
+    // Offline Banner
+    offlineBanner: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FF9800',
+        paddingHorizontal: 20,
+        paddingVertical: 12,
+        justifyContent: 'space-between',
+    },
+    offlineText: {
+        color: '#FFF',
+        fontSize: 14,
+        fontWeight: '500',
+        flex: 1,
+        marginLeft: 10,
+    },
+    syncNowButton: {
+        backgroundColor: 'rgba(255,255,255,0.2)',
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 15,
+    },
+    syncNowText: {
+        color: '#FFF',
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    // Header
     header: {
         backgroundColor: '#fff',
         paddingHorizontal: 24,
-        paddingTop: 28,
-        paddingBottom: 20,
+        paddingTop: 20,
+        paddingBottom: 16,
         borderBottomWidth: 1,
         borderBottomColor: '#e0e0e0',
     },
@@ -267,6 +505,7 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'flex-start',
+        marginBottom: 10,
     },
     headerLeft: {
         flex: 1,
@@ -275,11 +514,43 @@ const styles = StyleSheet.create({
         fontSize: 24,
         fontWeight: 'bold',
         color: '#1a237e',
-        marginBottom: 8,
+        marginBottom: 6,
     },
     welcomeText: {
         fontSize: 18,
         color: '#546e7a',
+        fontWeight: '500',
+    },
+    offlineBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFF8E1',
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 12,
+        marginTop: 8,
+        alignSelf: 'flex-start',
+    },
+    offlineBadgeText: {
+        color: '#FF9800',
+        fontSize: 12,
+        fontWeight: '500',
+        marginLeft: 4,
+    },
+    connectionStatus: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginTop: 8,
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        marginRight: 8,
+    },
+    statusText: {
+        fontSize: 13,
+        color: '#666',
         fontWeight: '500',
     },
     logoutButton: {
@@ -298,13 +569,14 @@ const styles = StyleSheet.create({
         fontWeight: '500',
         marginLeft: 6,
     },
+    // Airport Section
     airportSection: {
         flexDirection: 'row',
         alignItems: 'center',
         backgroundColor: '#fff',
         marginHorizontal: 24,
         marginTop: 16,
-        marginBottom: 8,
+        marginBottom: 16,
         padding: 16,
         borderRadius: 12,
         elevation: 1,
@@ -322,12 +594,53 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         color: '#1a237e',
     },
+    // Stats Grid (3 cards now)
+    statsGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        justifyContent: 'space-between',
+        paddingHorizontal: 20,
+        marginBottom: 16,
+    },
+    statCard: {
+        backgroundColor: '#fff',
+        width: '31%',
+        padding: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        marginBottom: 12,
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+    },
+    statIcon: {
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    statNumber: {
+        fontSize: 28,
+        fontWeight: 'bold',
+        color: '#1a237e',
+        marginBottom: 4,
+    },
+    statLabel: {
+        fontSize: 13,
+        color: '#666',
+        fontWeight: '500',
+        textAlign: 'center',
+    },
+    // Experience Card
     experienceCard: {
         backgroundColor: '#e8eaf6',
-        marginHorizontal: 24,
-        marginTop: 16,
+        marginHorizontal: 20,
         marginBottom: 20,
-        padding: 24,
+        padding: 20,
         borderRadius: 16,
         alignItems: 'center',
     },
@@ -335,7 +648,7 @@ const styles = StyleSheet.create({
         fontSize: 20,
         fontWeight: 'bold',
         color: '#1a237e',
-        marginBottom: 12,
+        marginBottom: 10,
         textAlign: 'center',
     },
     experienceDescription: {
@@ -353,10 +666,6 @@ const styles = StyleSheet.create({
         paddingVertical: 14,
         borderRadius: 30,
         elevation: 3,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
     },
     feedbackButtonText: {
         color: '#fff',
@@ -364,51 +673,81 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         marginLeft: 10,
     },
-    statsContainer: {
-        marginHorizontal: 24,
-        marginBottom: 20,
-    },
-    statsCard: {
+    // Activity Card
+    activityCard: {
         backgroundColor: '#fff',
+        marginHorizontal: 20,
+        marginBottom: 20,
+        padding: 20,
         borderRadius: 16,
-        padding: 28,
-        alignItems: 'center',
         elevation: 2,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.1,
-        shadowRadius: 8,
     },
-    statsIconContainer: {
-        backgroundColor: '#e8eaf6',
-        width: 64,
-        height: 64,
-        borderRadius: 32,
-        justifyContent: 'center',
+    activityHeader: {
+        flexDirection: 'row',
         alignItems: 'center',
         marginBottom: 16,
     },
-    statsNumber: {
-        fontSize: 48,
+    activityTitle: {
+        fontSize: 18,
         fontWeight: 'bold',
         color: '#1a237e',
-        marginBottom: 8,
+        marginLeft: 12,
     },
-    statsTitle: {
-        fontSize: 16,
-        color: '#546e7a',
-        fontWeight: '600',
-        marginBottom: 4,
+    activityItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: 12,
+        borderBottomWidth: 1,
+        borderBottomColor: '#f0f0f0',
     },
-    statsSubtitle: {
+    activityLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+    },
+    activityDetails: {
+        marginLeft: 12,
+    },
+    activityFlight: {
         fontSize: 14,
-        color: '#999',
-        textAlign: 'center',
+        color: '#333',
+        fontWeight: '500',
     },
+    activityTime: {
+        fontSize: 12,
+        color: '#666',
+        marginTop: 2,
+    },
+    offlineIndicator: {
+        backgroundColor: '#FFF8E1',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 10,
+    },
+    offlineIndicatorText: {
+        color: '#FF9800',
+        fontSize: 11,
+        fontWeight: '600',
+    },
+    viewAllButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingTop: 16,
+        paddingBottom: 4,
+    },
+    viewAllText: {
+        color: '#1a237e',
+        fontSize: 14,
+        fontWeight: '600',
+        marginRight: 4,
+    },
+    // History Card (Restored)
     historyCard: {
         backgroundColor: '#fff',
-        marginHorizontal: 24,
-        marginBottom: 30,
+        marginHorizontal: 20,
+        marginBottom: 20,
         padding: 24,
         borderRadius: 16,
         elevation: 2,
@@ -449,12 +788,38 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         marginLeft: 10,
     },
+    // System Card
+    systemCard: {
+        backgroundColor: '#fff',
+        marginHorizontal: 20,
+        marginBottom: 20,
+        padding: 20,
+        borderRadius: 16,
+        elevation: 2,
+    },
+    systemTitle: {
+        fontSize: 18,
+        fontWeight: 'bold',
+        color: '#1a237e',
+        marginBottom: 16,
+    },
+    systemItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginVertical: 8,
+    },
+    systemText: {
+        fontSize: 15,
+        color: '#555',
+        marginLeft: 12,
+    },
+    // Footer Links
     footerLinks: {
         flexDirection: 'row',
         flexWrap: 'wrap',
         justifyContent: 'center',
         alignItems: 'center',
-        paddingHorizontal: 24,
+        paddingHorizontal: 20,
         paddingVertical: 20,
         backgroundColor: '#fff',
         marginBottom: 8,
@@ -477,6 +842,7 @@ const styles = StyleSheet.create({
         color: '#999',
         marginHorizontal: 4,
     },
+    // Copyright Footer
     copyrightFooter: {
         padding: 16,
         alignItems: 'center',
@@ -488,13 +854,14 @@ const styles = StyleSheet.create({
         textAlign: 'center',
         fontWeight: '500',
     },
+    // Error Container
     errorContainer: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: '#ffebee',
         padding: 12,
-        marginHorizontal: 24,
+        marginHorizontal: 20,
         marginBottom: 16,
         borderRadius: 8,
         borderWidth: 1,
@@ -505,7 +872,7 @@ const styles = StyleSheet.create({
         fontSize: 14,
         marginLeft: 8,
     },
-    // Debug button styles
+    // Debug Button
     debugButton: {
         backgroundColor: '#f0f0f0',
         padding: 10,

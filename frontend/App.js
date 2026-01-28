@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -15,6 +15,10 @@ import PastSubmissionsScreen from './screens/PastSubmissionsScreen';
 import PastSubmissionDetailScreen from './screens/PastSubmissionDetailScreen';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { OfflineProvider } from './context/OfflineContext';
+import OfflineIndicator from './components/common/OfflineIndicator';
+import OfflineWarningBanner from './components/common/OfflineWarningBanner';
+import InternetMonitor from './services/internetMonitor';
 
 const Stack = createStackNavigator();
 const Drawer = createDrawerNavigator();
@@ -25,16 +29,15 @@ const MainDrawer = () => (
         initialRouteName="Dashboard"
         screenOptions={{
             headerTitle: '', // Empty title
-            headerShown: false, // Or hide header completely
+            headerShown: false,
         }}
     >
         <Drawer.Screen 
             name="Dashboard" 
             component={DashboardScreen}
             options={{
-                title: 'Dashboard', // This appears in drawer menu
-                drawerLabel: 'Dashboard', // Label in drawer
-                // Remove header title
+                title: 'Dashboard',
+                drawerLabel: 'Dashboard',
                 headerTitle: () => null,
             }}
         />
@@ -51,8 +54,13 @@ const MainDrawer = () => (
 );
 
 /* ---------------- NAV ---------------- */
-const AppNavigator = () => {
+const AppNavigator = ({ navigation }) => {  // Receive navigation prop
     const { user, isFirstLogin, loading } = useAuth();
+
+    // Set navigation for InternetMonitor
+    useEffect(() => {
+        InternetMonitor.setNavigation(navigation);
+    }, [navigation]);
 
     if (loading) {
         return (
@@ -63,60 +71,70 @@ const AppNavigator = () => {
     }
 
     return (
-        <NavigationContainer>
-            <Stack.Navigator
-                /* 🔥 THIS KEY IS THE MAGIC FIX */
-                key={
-                    !user
-                        ? 'logged-out'
-                        : isFirstLogin
-                        ? 'first-login'
-                        : 'logged-in'
-                }
-                screenOptions={{ headerShown: false }}
-            >
-                {!user ? (
-                    <>
-                        <Stack.Screen name="Login" component={LoginScreen} />
-                        <Stack.Screen name="Register" component={RegisterScreen} />
-                        <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
-                    </>
-                ) : isFirstLogin ? (
-                    <Stack.Screen
-                        name="ChangePassword"
-                        component={ChangePasswordScreen}
-                        initialParams={{ isFirstLogin: true }}
-                        options={{
-                            headerShown: true,
-                            title: 'Set Password',
-                            headerLeft: () => null,
+        <Stack.Navigator
+            key={
+                !user
+                    ? 'logged-out'
+                    : isFirstLogin
+                    ? 'first-login'
+                    : 'logged-in'
+            }
+            screenOptions={{ headerShown: false }}
+        >
+            {!user ? (
+                <>
+                    <Stack.Screen name="Login" component={LoginScreen} />
+                    <Stack.Screen name="Register" component={RegisterScreen} />
+                    <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+                </>
+            ) : isFirstLogin ? (
+                <Stack.Screen
+                    name="ChangePassword"
+                    component={ChangePasswordScreen}
+                    initialParams={{ isFirstLogin: true }}
+                    options={{
+                        headerShown: true,
+                        title: 'Set Password',
+                        headerLeft: () => null,
+                    }}
+                />
+            ) : (
+                <>
+                    <Stack.Screen name="Main" component={MainDrawer} />
+                    <Stack.Screen name="FeedbackForm" component={FeedbackFormScreen} />
+                    <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
+                    <Stack.Screen 
+                        name="PastSubmissionDetail" 
+                        component={PastSubmissionDetailScreen}
+                        options={{ 
+                            headerShown: false,
+                            title: 'Submission Details'
                         }}
                     />
-                ) : (
-                    <>
-                        <Stack.Screen name="Main" component={MainDrawer} />
-                        <Stack.Screen name="FeedbackForm" component={FeedbackFormScreen} />
-                        <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
-                        <Stack.Screen 
-                            name="PastSubmissionDetail" 
-                            component={PastSubmissionDetailScreen}
-                            options={{ 
-                                headerShown: false,
-                                title: 'Submission Details'
-                            }}
-                        />
-                    </>
-                )}
-            </Stack.Navigator>
-        </NavigationContainer>
+                </>
+            )}
+        </Stack.Navigator>
     );
 };
 
 /* ---------------- APP ---------------- */
 export default function App() {
+    useEffect(() => {
+        InternetMonitor.startMonitoring();
+        return () => {
+            InternetMonitor.stopMonitoring();
+        };
+    }, []);
+
     return (
-        <AuthProvider>
-            <AppNavigator />
-        </AuthProvider>
+        <OfflineProvider>
+            <AuthProvider>
+                <NavigationContainer>
+                    <AppNavigator />
+                    <OfflineWarningBanner />
+                    <OfflineIndicator />
+                </NavigationContainer>
+            </AuthProvider>
+        </OfflineProvider>
     );
 }

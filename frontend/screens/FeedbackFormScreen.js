@@ -7,8 +7,10 @@ import {
     Alert,
     TextInput,
     TouchableOpacity,
+    ActivityIndicator,
 } from 'react-native';
-import { useAuth } from '../context/AuthContext'; // ADD THIS IMPORT
+import AsyncStorage from '@react-native-async-storage/async-storage'; // ADD THIS IMPORT
+import { useAuth } from '../context/AuthContext';
 import Button from '../components/common/Button';
 import Input from '../components/common/Input';
 import { surveyService } from '../services/surveyService';
@@ -19,16 +21,64 @@ import {
     SURVEY_QUESTIONS,
 } from '../utils/constants';
 
+// ADD THESE CONSTANTS AT THE TOP
+const COOLDOWN_KEY = '@survey_last_submission';
+const COOLDOWN_MINUTES = 5;
+
+// ADD THESE UTILITY FUNCTIONS
+const checkSurveyCooldown = async () => {
+    try {
+        const lastSubmissionTime = await AsyncStorage.getItem(COOLDOWN_KEY);
+        
+        if (!lastSubmissionTime) {
+            return { canSubmit: true, remainingTime: 0 };
+        }
+
+        const lastTime = new Date(lastSubmissionTime).getTime();
+        const currentTime = new Date().getTime();
+        const timeDifference = currentTime - lastTime;
+        const cooldownMs = COOLDOWN_MINUTES * 60 * 1000;
+
+        if (timeDifference >= cooldownMs) {
+            return { canSubmit: true, remainingTime: 0 };
+        } else {
+            const remainingMs = cooldownMs - timeDifference;
+            return { 
+                canSubmit: false, 
+                remainingTime: remainingMs,
+                minutes: Math.floor(remainingMs / 60000),
+                seconds: Math.floor((remainingMs % 60000) / 1000)
+            };
+        }
+    } catch (error) {
+        console.error('Error checking cooldown:', error);
+        return { canSubmit: true, remainingTime: 0 };
+    }
+};
+
+const startSurveyCooldown = async () => {
+    try {
+        const now = new Date().toISOString();
+        await AsyncStorage.setItem(COOLDOWN_KEY, now);
+    } catch (error) {
+        console.error('Error setting cooldown:', error);
+    }
+};
+
+const formatTime = (ms) => {
+    const minutes = Math.floor(ms / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
 const FeedbackFormScreen = ({ navigation }) => {
-    // Get user data from AuthContext
-    const { user } = useAuth(); // ADD THIS
+    const { user } = useAuth();
     
-    // Update AIRCRAFT_SECTIONS to remove "Tourist"
     const aircraftSections = ['First Class', 'Business/Upper Class', 'Economy'];
     
     const [formData, setFormData] = useState({
-        airportName: user?.airportName || '', // Auto-populate from user
-        airportCode: user?.airportCode || '', // Auto-populate from user
+        airportName: user?.airportName || '',
+        airportCode: user?.airportCode || '',
         flightNumber: '',
         travelDate: '',
         travelTime: '',
@@ -45,17 +95,58 @@ const FeedbackFormScreen = ({ navigation }) => {
             boardingGate: { rating: '', comments: '' },
         },
         additionalComments: '',
-        submissionDate: '', // Will be auto-filled on submission
-        submissionTime: '', // Will be auto-filled on submission
+        submissionDate: '',
+        submissionTime: '',
     });
+    
     const [loading, setLoading] = useState(false);
     const [errors, setErrors] = useState({});
+    
+    // ADD THESE STATE VARIABLES FOR COOLDOWN
+    const [canSubmit, setCanSubmit] = useState(true);
+    const [remainingTime, setRemainingTime] = useState(0);
+    const [isCheckingCooldown, setIsCheckingCooldown] = useState(true);
+
+    // ADD COOLDOWN CHECK ON SCREEN LOAD
+    useEffect(() => {
+        checkCooldownStatus();
+    }, []);
+
+    // ADD COUNTDOWN TIMER EFFECT
+    useEffect(() => {
+        let timer;
+        if (remainingTime > 0) {
+            timer = setInterval(() => {
+                setRemainingTime(prev => {
+                    if (prev <= 1000) {
+                        clearInterval(timer);
+                        setCanSubmit(true);
+                        return 0;
+                    }
+                    return prev - 1000;
+                });
+            }, 1000);
+        }
+        
+        return () => {
+            if (timer) clearInterval(timer);
+        };
+    }, [remainingTime]);
+
+    // ADD COOLDOWN CHECK FUNCTION
+    const checkCooldownStatus = async () => {
+        setIsCheckingCooldown(true);
+        const cooldownStatus = await checkSurveyCooldown();
+        setCanSubmit(cooldownStatus.canSubmit);
+        setRemainingTime(cooldownStatus.remainingTime);
+        setIsCheckingCooldown(false);
+    };
 
     // Function to get current date in DD-MM-YYYY format
     const getCurrentDate = () => {
         const now = new Date();
         const day = String(now.getDate()).padStart(2, '0');
-        const month = String(now.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+        const month = String(now.getMonth() + 1).padStart(2, '0');
         const year = now.getFullYear();
         return `${day}-${month}-${year}`;
     };
@@ -70,15 +161,12 @@ const FeedbackFormScreen = ({ navigation }) => {
 
     // Function to format date as user types (DD-MM-YYYY)
     const formatDate = (text) => {
-        // Remove all non-digit characters
         let cleaned = text.replace(/\D/g, '');
         
-        // Limit to 8 digits (DDMMYYYY)
         if (cleaned.length > 8) {
             cleaned = cleaned.substring(0, 8);
         }
         
-        // Add dashes automatically
         let formatted = cleaned;
         if (cleaned.length > 2) {
             formatted = cleaned.substring(0, 2) + '-' + cleaned.substring(2);
@@ -91,16 +179,13 @@ const FeedbackFormScreen = ({ navigation }) => {
     };
 
     // Function to format time as user types (HH:MM)
-    const formatTime = (text) => {
-        // Remove all non-digit characters
+    const formatTimeInput = (text) => {
         let cleaned = text.replace(/\D/g, '');
         
-        // Limit to 4 digits (HHMM)
         if (cleaned.length > 4) {
             cleaned = cleaned.substring(0, 4);
         }
         
-        // Add colon automatically
         let formatted = cleaned;
         if (cleaned.length > 2) {
             formatted = cleaned.substring(0, 2) + ':' + cleaned.substring(2);
@@ -113,11 +198,9 @@ const FeedbackFormScreen = ({ navigation }) => {
     const convertDateForAPI = (dateStr) => {
         if (!dateStr || dateStr.length !== 10) return dateStr;
         
-        // Split DD-MM-YYYY into parts
         const parts = dateStr.split('-');
         if (parts.length !== 3) return dateStr;
         
-        // Reformat to YYYY-MM-DD
         const [day, month, year] = parts;
         return `${year}-${month}-${day}`;
     };
@@ -125,21 +208,19 @@ const FeedbackFormScreen = ({ navigation }) => {
     const handleDateChange = (text) => {
         const formatted = formatDate(text);
         setFormData({ ...formData, travelDate: formatted });
-        // Clear error if user is typing
         if (errors.travelDate) {
             setErrors({ ...errors, travelDate: null });
         }
     };
 
     const handleTimeChange = (text) => {
-        const formatted = formatTime(text);
+        const formatted = formatTimeInput(text);
         setFormData({ ...formData, travelTime: formatted });
     };
 
     const validate = () => {
         const newErrors = {};
         
-        // Airport name and code are now auto-filled, but still validate they exist
         if (!formData.airportName.trim()) newErrors.airportName = 'Airport name is required';
         if (!formData.airportCode.trim()) newErrors.airportCode = 'Airport code is required';
         if (!formData.flightNumber.trim()) newErrors.flightNumber = 'Flight number is required';
@@ -148,7 +229,6 @@ const FeedbackFormScreen = ({ navigation }) => {
         if (!formData.aircraftSection) newErrors.aircraftSection = 'Aircraft section is required';
         if (!formData.returnTrips) newErrors.returnTrips = 'Return trips is required';
         
-        // Date validation - must be exactly DD-MM-YYYY format
         if (!formData.travelDate.trim()) {
             newErrors.travelDate = 'Travel date is required';
         } else if (formData.travelDate.length !== 10) {
@@ -186,7 +266,18 @@ const FeedbackFormScreen = ({ navigation }) => {
         });
     };
 
+    // UPDATE THE handleSubmit FUNCTION
     const handleSubmit = async () => {
+        // ADD COOLDOWN CHECK AT THE BEGINNING
+        if (!canSubmit) {
+            Alert.alert(
+                'Cooldown Active',
+                `Please wait ${formatTime(remainingTime)} before submitting another survey.`,
+                [{ text: 'OK' }]
+            );
+            return;
+        }
+
         const validationErrors = validate();
         console.log('🔧 [DEBUG] Validation errors:', validationErrors);
         
@@ -207,9 +298,8 @@ const FeedbackFormScreen = ({ navigation }) => {
                 ...formData,
                 travelDate: convertDateForAPI(formData.travelDate),
                 travelTime: formData.travelTime && formData.travelTime !== '--:--' ? formData.travelTime : '',
-                submissionDate: convertDateForAPI(submissionDate), // Add submission date
-                submissionTime: submissionTime, // Add submission time
-                // Ensure all required rating fields are present
+                submissionDate: convertDateForAPI(submissionDate),
+                submissionTime: submissionTime,
                 ratings: Object.keys(formData.ratings).reduce((acc, key) => {
                     acc[key] = {
                         rating: formData.ratings[key].rating || '',
@@ -218,8 +308,8 @@ const FeedbackFormScreen = ({ navigation }) => {
                     return acc;
                 }, {}),
                 additionalComments: formData.additionalComments || '',
-                submittedBy: user?._id || user?.id, // Optional: track who submitted
-                userEmail: user?.email // Optional: track user email
+                submittedBy: user?._id || user?.id,
+                userEmail: user?.email
             };
             
             console.log('🔧 [DEBUG] Sending to API:', {
@@ -229,6 +319,9 @@ const FeedbackFormScreen = ({ navigation }) => {
             });
             
             await surveyService.submitFeedback(apiData);
+            
+            // ADD COOLDOWN START AFTER SUCCESSFUL SUBMISSION
+            await startSurveyCooldown();
             
             // Clear form after successful submission
             setFormData({
@@ -254,9 +347,10 @@ const FeedbackFormScreen = ({ navigation }) => {
                 submissionTime: '',
             });
             
+            // UPDATE ALERT MESSAGE TO MENTION COOLDOWN
             Alert.alert(
                 '✅ Success',
-                'Feedback submitted successfully!',
+                'Feedback submitted successfully! You can submit another survey in 5 minutes.',
                 [
                     {
                         text: 'OK',
@@ -309,7 +403,6 @@ const FeedbackFormScreen = ({ navigation }) => {
                 </View>
                 
                 <View style={styles.ratingContainer}>
-                    {/* Row 1: Excellent and Very Good */}
                     <View style={styles.ratingRow}>
                         <TouchableOpacity
                             style={[
@@ -362,7 +455,6 @@ const FeedbackFormScreen = ({ navigation }) => {
                         </TouchableOpacity>
                     </View>
                     
-                    {/* Row 2: Good and Fair */}
                     <View style={styles.ratingRow}>
                         <TouchableOpacity
                             style={[
@@ -415,7 +507,6 @@ const FeedbackFormScreen = ({ navigation }) => {
                         </TouchableOpacity>
                     </View>
                     
-                    {/* Row 3: Poor (centered) */}
                     <View style={[styles.ratingRow, styles.poorRow]}>
                         <TouchableOpacity
                             style={[
@@ -460,15 +551,37 @@ const FeedbackFormScreen = ({ navigation }) => {
         );
     };
 
+    // ADD LOADING INDICATOR FOR COOLDOWN CHECK
+    if (isCheckingCooldown) {
+        return (
+            <View style={styles.centerContainer}>
+                <ActivityIndicator size="large" color="#1e3a8a" />
+                <Text style={styles.loadingText}>Checking survey availability...</Text>
+            </View>
+        );
+    }
+
     return (
         <ScrollView style={styles.container}>
             <View style={styles.header}>
                 <Text style={styles.headerTitle}>✈️ AAI Survey Portal</Text>
                 <Text style={styles.headerSubtitle}>Customer Satisfaction Survey</Text>
+                
+                {/* ADD COOLDOWN TIMER DISPLAY */}
+                {!canSubmit && (
+                    <View style={styles.cooldownBanner}>
+                        <Text style={styles.cooldownText}>
+                            ⏰ Next survey available in: {formatTime(remainingTime)}
+                        </Text>
+                        <Text style={styles.cooldownSubtext}>
+                            You can only submit one survey every 5 minutes
+                        </Text>
+                    </View>
+                )}
             </View>
 
             <View style={styles.form}>
-                {/* Airport Details - NOW AUTO-POPULATED AND READ-ONLY */}
+                {/* Airport Details */}
                 <View style={styles.section}>
                     <Text style={styles.sectionLabel}>Airport Name</Text>
                     <View style={styles.autoFieldContainer}>
@@ -565,7 +678,7 @@ const FeedbackFormScreen = ({ navigation }) => {
                 {/* Aircraft Section */}
                 {renderRadioGroup(
                     '🛩️ Which section of the aircraft are you travelling in?',
-                    aircraftSections, // Using updated array without Tourist
+                    aircraftSections,
                     formData.aircraftSection,
                     (section) => setFormData({ ...formData, aircraftSection: section }),
                     errors.aircraftSection
@@ -602,7 +715,7 @@ const FeedbackFormScreen = ({ navigation }) => {
                     />
                 </View>
 
-                {/* Submission Info - Show to user */}
+                {/* Submission Info */}
                 <View style={styles.infoCard}>
                     <Text style={styles.infoTitle}>ℹ️ Submission Information</Text>
                     <Text style={styles.infoText}>
@@ -611,16 +724,21 @@ const FeedbackFormScreen = ({ navigation }) => {
                     <Text style={styles.infoText}>
                         • Submission date & time will be recorded automatically
                     </Text>
+                    {/* ADD COOLDOWN INFO */}
+                    <Text style={styles.infoText}>
+                        • You can submit only one survey every 5 minutes
+                    </Text>
                 </View>
 
                 {/* Submit Button */}
                 <View style={styles.submitSection}>
                     <Button
-                        title="✅ SUBMIT FEEDBACK"
+                        title={!canSubmit ? `Wait ${formatTime(remainingTime)}` : "✅ SUBMIT FEEDBACK"}
                         onPress={handleSubmit}
                         loading={loading}
-                        style={styles.submitButton}
+                        style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
                         textStyle={styles.submitButtonText}
+                        disabled={!canSubmit || loading}
                     />
                     <Text style={styles.helpText}>
                         ℹ️ Need help? Contact AAI Support or FAQ
@@ -655,6 +773,41 @@ const styles = StyleSheet.create({
         color: '#e0e7ff',
         textAlign: 'center',
     },
+    // ADD COOLDOWN BANNER STYLES
+    cooldownBanner: {
+        backgroundColor: 'rgba(255, 193, 7, 0.15)',
+        borderWidth: 1,
+        borderColor: '#ffc107',
+        borderRadius: 8,
+        padding: 12,
+        marginTop: 12,
+        width: '90%',
+        alignItems: 'center',
+    },
+    cooldownText: {
+        fontSize: 15,
+        fontWeight: 'bold',
+        color: '#ffc107',
+        marginBottom: 4,
+        textAlign: 'center',
+    },
+    cooldownSubtext: {
+        fontSize: 13,
+        color: '#ffc107',
+        textAlign: 'center',
+    },
+    // ADD LOADING STYLES
+    centerContainer: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: '#f8f9fa',
+    },
+    loadingText: {
+        marginTop: 16,
+        fontSize: 16,
+        color: '#64748b',
+    },
     form: {
         padding: 16,
     },
@@ -685,7 +838,6 @@ const styles = StyleSheet.create({
         marginBottom: 8,
         marginTop: 12,
     },
-    // New styles for auto-populated fields
     autoFieldContainer: {
         borderWidth: 1,
         borderColor: '#e2e8f0',
@@ -947,7 +1099,6 @@ const styles = StyleSheet.create({
         textAlignVertical: 'top',
         lineHeight: 22,
     },
-    // New info card
     infoCard: {
         backgroundColor: '#e8f4fd',
         padding: 16,
@@ -984,6 +1135,10 @@ const styles = StyleSheet.create({
         shadowOpacity: 0.15,
         shadowRadius: 6,
         elevation: 5,
+    },
+    // ADD DISABLED BUTTON STYLE
+    submitButtonDisabled: {
+        backgroundColor: '#94a3b8',
     },
     submitButtonText: {
         fontSize: 18,

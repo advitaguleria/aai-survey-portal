@@ -11,9 +11,17 @@ const generateRandomPassword = () => {
 // Register user
 exports.register = async (req, res) => {
     try {
-        const { fullName, email, mobileNumber, companyOrganization, airportCode, airportName } = req.body;
+        const { fullName, email, mobileNumber, companyOrganization, airportCode, airportName, deviceId } = req.body;
         
-        // Check if user already exists
+        // CHECK 1: Check if device already registered
+        const existingDevice = await User.findOne({ deviceId });
+        if (existingDevice) {
+            return res.status(400).json({ 
+                message: 'This device is already registered. Please login with your existing account or use a different device.' 
+            });
+        }
+        
+        // CHECK 2: Check if user already exists
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ message: 'User already exists' });
@@ -32,6 +40,7 @@ exports.register = async (req, res) => {
             airportCode,
             airportName,
             password: randomPassword,
+            deviceId: deviceId // Store device ID
         });
         
         await user.save();
@@ -52,7 +61,7 @@ exports.register = async (req, res) => {
 // Login user
 exports.login = async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { email, password, deviceId } = req.body;
         
         // Find user
         const user = await User.findOne({ email });
@@ -84,10 +93,9 @@ exports.login = async (req, res) => {
                 fullName: user.fullName,
                 email: user.email,
                 airportCode: user.airportCode,
-                airportName: user.airportName,  // ✅ Add this if needed
+                airportName: user.airportName,
                 surveysCompleted: user.surveysCompleted,
-                isFirstLogin: user.isFirstLogin,  // ✅ This will now be true for first login
-                // Add any other fields you need in frontend
+                isFirstLogin: user.isFirstLogin,
             },
         });
     } catch (error) {
