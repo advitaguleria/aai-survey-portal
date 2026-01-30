@@ -2,7 +2,7 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // USE YOUR IP ADDRESS HERE
-const API_BASE_URL = 'http://192.168.0.116:5000/api';  // MUST MATCH YOUR BACKEND
+const API_BASE_URL = 'https://aai-survey-portal.onrender.com';  // MUST MATCH YOUR BACKEND
 
 const api = axios.create({
     baseURL: API_BASE_URL,
